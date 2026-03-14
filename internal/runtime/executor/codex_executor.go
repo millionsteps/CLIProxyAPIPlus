@@ -574,6 +574,13 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	svc := codexauth.NewCodexAuth(e.cfg)
 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
+		if codexBodyHasIrrecoverableCredentialError([]byte(err.Error())) {
+			return nil, statusErr{
+				code:         http.StatusUnauthorized,
+				msg:          err.Error(),
+				shouldDelete: true,
+			}
+		}
 		return nil, err
 	}
 	if auth.Metadata == nil {
@@ -683,7 +690,43 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	if retryAfter := parseCodexRetryAfter(statusCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
+	if isCodexIrrecoverableAuthError(statusCode, body) {
+		err.shouldDelete = true
+	}
 	return err
+}
+
+func isCodexIrrecoverableAuthError(statusCode int, body []byte) bool {
+	if statusCode != http.StatusUnauthorized {
+		return false
+	}
+	return codexBodyHasIrrecoverableCredentialError(body)
+}
+
+func codexBodyHasIrrecoverableCredentialError(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	if code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String())); code == "token_expired" {
+		return true
+	}
+	raw := strings.ToLower(strings.TrimSpace(string(body)))
+	message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	for _, candidate := range []string{message, raw} {
+		if candidate == "" {
+			continue
+		}
+		if strings.Contains(candidate, "could not validate your token") {
+			return true
+		}
+		if strings.Contains(candidate, "authentication token has been invalidated") {
+			return true
+		}
+		if strings.Contains(candidate, "token has been invalidated") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {

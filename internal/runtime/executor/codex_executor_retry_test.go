@@ -60,6 +60,29 @@ func TestParseCodexRetryAfter(t *testing.T) {
 	})
 }
 
+func TestNewCodexStatusErr_ShouldDeleteForIrrecoverable401(t *testing.T) {
+	t.Run("token_expired", func(t *testing.T) {
+		err := newCodexStatusErr(http.StatusUnauthorized, []byte(`{"error":{"code":"token_expired","message":"expired"}}`))
+		if !err.ShouldDeleteCredential() {
+			t.Fatalf("expected token_expired to trigger credential deletion")
+		}
+	})
+
+	t.Run("invalidated_token_message", func(t *testing.T) {
+		err := newCodexStatusErr(http.StatusUnauthorized, []byte(`{"error":{"message":"Authentication token has been invalidated"}}`))
+		if !err.ShouldDeleteCredential() {
+			t.Fatalf("expected invalidated token to trigger credential deletion")
+		}
+	})
+
+	t.Run("quota_error_does_not_delete", func(t *testing.T) {
+		err := newCodexStatusErr(http.StatusTooManyRequests, []byte(`{"error":{"type":"usage_limit_reached","message":"quota exceeded"}}`))
+		if err.ShouldDeleteCredential() {
+			t.Fatalf("expected quota error to keep credential")
+		}
+	})
+}
+
 func itoa(v int64) string {
 	return strconv.FormatInt(v, 10)
 }

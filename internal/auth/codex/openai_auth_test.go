@@ -42,3 +42,31 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 		t.Fatalf("expected 1 refresh attempt, got %d", got)
 	}
 }
+
+func TestRefreshTokensWithRetry_TokenExpiredOnlyAttemptsOnce(t *testing.T) {
+	var calls int32
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				atomic.AddInt32(&calls, 1)
+				return &http.Response{
+					StatusCode: http.StatusUnauthorized,
+					Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_grant","code":"token_expired"}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	_, err := auth.RefreshTokensWithRetry(context.Background(), "dummy_refresh_token", 3)
+	if err == nil {
+		t.Fatalf("expected error for expired refresh token")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "token_expired") {
+		t.Fatalf("expected token_expired in error, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected 1 refresh attempt, got %d", got)
+	}
+}

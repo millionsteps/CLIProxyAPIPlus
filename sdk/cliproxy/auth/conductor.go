@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -95,6 +96,8 @@ type Result struct {
 	Success bool
 	// RetryAfter carries a provider supplied retry hint (e.g. 429 retryDelay).
 	RetryAfter *time.Duration
+	// ShouldDelete marks the auth as irrecoverable and eligible for removal.
+	ShouldDelete bool
 	// Error describes the failure when Success is false.
 	Error *Error
 }
@@ -496,7 +499,14 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, ro
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
-				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr})
+				m.MarkResult(ctx, Result{
+					AuthID:       auth.ID,
+					Provider:     provider,
+					Model:        routeModel,
+					Success:      false,
+					ShouldDelete: shouldDeleteCredentialFromError(chunk.Err),
+					Error:        rerr,
+				})
 			}
 			if !forward {
 				return false
@@ -551,6 +561,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				rerr.HTTPStatus = se.StatusCode()
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
+			result.ShouldDelete = shouldDeleteCredentialFromError(errStream)
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
 			if isRequestInvalidError(errStream) {
@@ -572,6 +583,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					rerr.HTTPStatus = se.StatusCode()
 				}
 				result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
+				result.ShouldDelete = shouldDeleteCredentialFromError(bootstrapErr)
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
@@ -583,6 +595,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					rerr.HTTPStatus = se.StatusCode()
 				}
 				result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
+				result.ShouldDelete = shouldDeleteCredentialFromError(bootstrapErr)
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
@@ -1018,6 +1031,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				result.Error = &Error{Message: errExec.Error()}
+				result.ShouldDelete = shouldDeleteCredentialFromError(errExec)
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 					result.Error.HTTPStatus = se.StatusCode()
 				}
@@ -1090,6 +1104,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				result.Error = &Error{Message: errExec.Error()}
+				result.ShouldDelete = shouldDeleteCredentialFromError(errExec)
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 					result.Error.HTTPStatus = se.StatusCode()
 				}
@@ -1703,8 +1718,66 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
 	}
+	if result.ShouldDelete && authSnapshot != nil {
+		m.cleanupIrrecoverableAuth(ctx, authSnapshot, result.Error)
+	}
 
 	m.hook.OnResult(ctx, result)
+}
+
+func (m *Manager) cleanupIrrecoverableAuth(ctx context.Context, auth *Auth, resultErr *Error) {
+	if m == nil || auth == nil {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return
+	}
+	if err := m.deleteAuthCredential(ctx, auth); err != nil {
+		log.Warnf("auth cleanup skipped after irrecoverable credential error: provider=%s id=%s err=%v deleteErr=%v", auth.Provider, authID, resultErr, err)
+		return
+	}
+
+	m.mu.Lock()
+	delete(m.auths, authID)
+	delete(m.modelPoolOffsets, authID)
+	m.mu.Unlock()
+
+	if m.scheduler != nil {
+		m.scheduler.removeAuth(authID)
+	}
+	registry.GetGlobalRegistry().UnregisterClient(authID)
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	log.Warnf("auth credential removed after irrecoverable error: provider=%s id=%s err=%v", auth.Provider, authID, resultErr)
+}
+
+func (m *Manager) deleteAuthCredential(ctx context.Context, auth *Auth) error {
+	if m == nil || auth == nil {
+		return nil
+	}
+	var deleteErr error
+	if m.store != nil {
+		if err := m.store.Delete(ctx, auth.ID); err == nil || os.IsNotExist(err) {
+			return nil
+		} else {
+			deleteErr = err
+		}
+	}
+
+	path := ""
+	if auth.Attributes != nil {
+		path = strings.TrimSpace(auth.Attributes["path"])
+	}
+	if path == "" {
+		return deleteErr
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if deleteErr != nil {
+			return errors.Join(deleteErr, err)
+		}
+		return err
+	}
+	return nil
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
@@ -1858,6 +1931,20 @@ func statusCodeFromError(err error) int {
 	return 0
 }
 
+func shouldDeleteCredentialFromError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type credentialDeleteHint interface {
+		ShouldDeleteCredential() bool
+	}
+	var hint credentialDeleteHint
+	if errors.As(err, &hint) && hint != nil {
+		return hint.ShouldDeleteCredential()
+	}
+	return false
+}
+
 func retryAfterFromError(err error) *time.Duration {
 	if err == nil {
 		return nil
@@ -1873,7 +1960,8 @@ func retryAfterFromError(err error) *time.Duration {
 	if retryAfter == nil {
 		return nil
 	}
-	return new(*retryAfter)
+	value := *retryAfter
+	return &value
 }
 
 func statusCodeFromResult(err *Error) int {
@@ -2641,6 +2729,8 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
+		shouldDelete := shouldDeleteCredentialFromError(err)
+		var authSnapshot *Auth
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
@@ -2649,8 +2739,12 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
 			}
+			authSnapshot = current.Clone()
 		}
 		m.mu.Unlock()
+		if shouldDelete && authSnapshot != nil {
+			m.cleanupIrrecoverableAuth(ctx, authSnapshot, authSnapshot.LastError)
+		}
 		return
 	}
 	if updated == nil {
