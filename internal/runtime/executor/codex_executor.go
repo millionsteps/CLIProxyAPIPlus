@@ -576,9 +576,8 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if err != nil {
 		if codexBodyHasIrrecoverableCredentialError([]byte(err.Error())) {
 			return nil, statusErr{
-				code:         http.StatusUnauthorized,
-				msg:          err.Error(),
-				shouldDelete: true,
+				code: http.StatusUnauthorized,
+				msg:  err.Error(),
 			}
 		}
 		return nil, err
@@ -689,9 +688,6 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if retryAfter := parseCodexRetryAfter(statusCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
-	}
-	if isCodexIrrecoverableAuthError(statusCode, body) {
-		err.shouldDelete = true
 	}
 	return err
 }

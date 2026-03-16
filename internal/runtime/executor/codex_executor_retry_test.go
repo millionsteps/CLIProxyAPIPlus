@@ -60,18 +60,18 @@ func TestParseCodexRetryAfter(t *testing.T) {
 	})
 }
 
-func TestNewCodexStatusErr_ShouldDeleteForIrrecoverable401(t *testing.T) {
+func TestNewCodexStatusErr_DoesNotDeleteCredentialFor401(t *testing.T) {
 	t.Run("token_expired", func(t *testing.T) {
 		err := newCodexStatusErr(http.StatusUnauthorized, []byte(`{"error":{"code":"token_expired","message":"expired"}}`))
-		if !err.ShouldDeleteCredential() {
-			t.Fatalf("expected token_expired to trigger credential deletion")
+		if err.ShouldDeleteCredential() {
+			t.Fatalf("expected token_expired to keep credential for later validation")
 		}
 	})
 
 	t.Run("invalidated_token_message", func(t *testing.T) {
 		err := newCodexStatusErr(http.StatusUnauthorized, []byte(`{"error":{"message":"Authentication token has been invalidated"}}`))
-		if !err.ShouldDeleteCredential() {
-			t.Fatalf("expected invalidated token to trigger credential deletion")
+		if err.ShouldDeleteCredential() {
+			t.Fatalf("expected invalidated token to keep credential for later validation")
 		}
 	})
 
