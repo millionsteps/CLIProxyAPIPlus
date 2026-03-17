@@ -105,6 +105,10 @@ type Config struct {
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
+	// CodexFreeLatestModels adds newer Codex models to OAuth/file-backed free-plan accounts.
+	// When enabled, free accounts also register gpt-5.3-codex and gpt-5.4.
+	CodexFreeLatestModels bool `yaml:"codex-free-latest-models" json:"codex-free-latest-models"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 

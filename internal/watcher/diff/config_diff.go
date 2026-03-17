@@ -69,6 +69,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.ForceModelPrefix != newCfg.ForceModelPrefix {
 		changes = append(changes, fmt.Sprintf("force-model-prefix: %t -> %t", oldCfg.ForceModelPrefix, newCfg.ForceModelPrefix))
 	}
+	if oldCfg.CodexFreeLatestModels != newCfg.CodexFreeLatestModels {
+		changes = append(changes, fmt.Sprintf("codex-free-latest-models: %t -> %t", oldCfg.CodexFreeLatestModels, newCfg.CodexFreeLatestModels))
+	}
 	if oldCfg.NonStreamKeepAliveInterval != newCfg.NonStreamKeepAliveInterval {
 		changes = append(changes, fmt.Sprintf("nonstream-keepalive-interval: %d -> %d", oldCfg.NonStreamKeepAliveInterval, newCfg.NonStreamKeepAliveInterval))
 	}

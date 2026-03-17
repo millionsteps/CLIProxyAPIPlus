@@ -190,6 +190,11 @@ nonstream-keepalive-interval: 0
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
 
+# Optional: expose newer Codex models to OAuth/file-backed free-plan accounts.
+# Default is false. When enabled, free accounts also register gpt-5.3-codex and gpt-5.4.
+# This does not affect codex-api-key entries.
+# codex-free-latest-models: true
+
 # Kiro (AWS CodeWhisperer) configuration
 # Note: Kiro API currently only operates in us-east-1 region
 #kiro:

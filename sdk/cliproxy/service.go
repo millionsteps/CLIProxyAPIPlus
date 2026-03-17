@@ -465,6 +465,11 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 	GlobalModelRegistry().RegisterClient(a.ID, providerKey, models)
 }
 
+var codexFreeLatestModelIDs = []string{
+	"gpt-5.3-codex",
+	"gpt-5.4",
+}
+
 // rebindExecutors refreshes provider executors so they observe the latest configuration.
 func (s *Service) rebindExecutors() {
 	if s == nil || s.coreManager == nil {
@@ -910,18 +915,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		if a.Attributes != nil {
 			codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
 		}
-		switch strings.ToLower(codexPlanType) {
-		case "pro":
-			models = registry.GetCodexProModels()
-		case "plus":
-			models = registry.GetCodexPlusModels()
-		case "team", "business", "go":
-			models = registry.GetCodexTeamModels()
-		case "free":
-			models = registry.GetCodexFreeModels()
-		default:
-			models = registry.GetCodexProModels()
-		}
+		models = s.codexModelsForPlan(codexPlanType)
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildCodexConfigModels(entry)
@@ -1047,6 +1041,67 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	}
 
 	GlobalModelRegistry().UnregisterClient(a.ID)
+}
+
+func (s *Service) codexModelsForPlan(planType string) []*ModelInfo {
+	switch strings.ToLower(strings.TrimSpace(planType)) {
+	case "pro":
+		return registry.GetCodexProModels()
+	case "plus":
+		return registry.GetCodexPlusModels()
+	case "team", "business", "go":
+		return registry.GetCodexTeamModels()
+	case "free":
+		models := registry.GetCodexFreeModels()
+		if s == nil || s.cfg == nil || !s.cfg.CodexFreeLatestModels {
+			return models
+		}
+		extras := make([]*ModelInfo, 0, len(codexFreeLatestModelIDs))
+		for _, modelID := range codexFreeLatestModelIDs {
+			if info := registry.LookupStaticModelInfo(modelID); info != nil {
+				extras = append(extras, info)
+			}
+		}
+		return appendUniqueModelInfos(models, extras...)
+	default:
+		return registry.GetCodexProModels()
+	}
+}
+
+func appendUniqueModelInfos(base []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
+	if len(extras) == 0 {
+		return base
+	}
+
+	seen := make(map[string]struct{}, len(base)+len(extras))
+	out := append([]*ModelInfo(nil), base...)
+	for _, model := range out {
+		if model == nil {
+			continue
+		}
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		seen[modelID] = struct{}{}
+	}
+
+	for _, model := range extras {
+		if model == nil {
+			continue
+		}
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		if _, exists := seen[modelID]; exists {
+			continue
+		}
+		out = append(out, model)
+		seen[modelID] = struct{}{}
+	}
+
+	return out
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for

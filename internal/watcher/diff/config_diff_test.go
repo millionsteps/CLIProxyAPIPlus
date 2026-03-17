@@ -214,6 +214,16 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	expectContains(t, details, "remote-management.secret-key: created")
 }
 
+func TestBuildConfigChangeDetails_CodexFreeLatestModels(t *testing.T) {
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{
+		CodexFreeLatestModels: true,
+	}
+
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "codex-free-latest-models: false -> true")
+}
+
 func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	oldCfg := &config.Config{
 		Port:                   1000,
