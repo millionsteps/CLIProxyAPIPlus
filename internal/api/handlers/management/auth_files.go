@@ -59,6 +59,12 @@ const (
 	gitLabLoginModePAT    = "pat"
 )
 
+const (
+	authContentReasonProviderNotAllowed = "provider_not_allowed"
+	authContentReasonUnknownPlanType    = "unknown_plan_type"
+	authContentReasonNotFreePlan        = "not_free_plan"
+)
+
 type callbackForwarder struct {
 	provider string
 	server   *http.Server
@@ -547,23 +553,214 @@ func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true")
 }
 
+func authContentStringValue(metadata map[string]any, keys ...string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	for _, key := range keys {
+		if v, ok := metadata[key].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	if nested, ok := metadata["metadata"].(map[string]any); ok {
+		for _, key := range keys {
+			if v, ok := nested[key].(string); ok && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	if nested, ok := metadata["credentials"].(map[string]any); ok {
+		for _, key := range keys {
+			if v, ok := nested[key].(string); ok && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	return ""
+}
+
+func authContentPlanTypeFromFileName(name string) string {
+	base := strings.ToLower(strings.TrimSpace(filepath.Base(name)))
+	switch {
+	case strings.HasSuffix(base, "-free.json"):
+		return "free"
+	case strings.HasSuffix(base, "-plus.json"):
+		return "plus"
+	case strings.HasSuffix(base, "-team.json"):
+		return "team"
+	default:
+		return ""
+	}
+}
+
+func authContentCodexClaims(metadata map[string]any) *codex.JWTClaims {
+	idToken := authContentStringValue(metadata, "id_token")
+	if idToken == "" {
+		return nil
+	}
+	claims, err := codex.ParseJWTToken(idToken)
+	if err != nil || claims == nil {
+		return nil
+	}
+	return claims
+}
+
+func authContentPlanType(provider, fileName string, metadata map[string]any) string {
+	planType := strings.ToLower(strings.TrimSpace(authContentStringValue(metadata, "plan_type", "planType")))
+	if planType != "" {
+		return planType
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		if claims := authContentCodexClaims(metadata); claims != nil {
+			if v := strings.ToLower(strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)); v != "" {
+				return v
+			}
+		}
+	}
+	return authContentPlanTypeFromFileName(fileName)
+}
+
+func authContentAccountID(provider string, metadata map[string]any) string {
+	accountID := authContentStringValue(metadata, "account_id", "accountId", "chatgpt_account_id")
+	if accountID != "" {
+		return accountID
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		if claims := authContentCodexClaims(metadata); claims != nil {
+			if v := strings.TrimSpace(claims.GetAccountID()); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+func authContentPayload(provider, fileName string, metadata map[string]any) (gin.H, string, error) {
+	normalizedProvider := strings.ToLower(strings.TrimSpace(provider))
+	if normalizedProvider == "" {
+		normalizedProvider = strings.ToLower(strings.TrimSpace(authContentStringValue(metadata, "type", "provider")))
+	}
+	if normalizedProvider != "codex" {
+		return nil, authContentReasonProviderNotAllowed, fmt.Errorf("provider not allowed")
+	}
+
+	planType := authContentPlanType(normalizedProvider, fileName, metadata)
+	switch planType {
+	case "free":
+	case "":
+		return nil, authContentReasonUnknownPlanType, fmt.Errorf("unknown plan type")
+	default:
+		return nil, authContentReasonNotFreePlan, fmt.Errorf("auth is not free")
+	}
+
+	accessToken := authContentStringValue(metadata, "access_token", "accessToken", "token", "auth_token")
+	if accessToken == "" {
+		return nil, "", fmt.Errorf("missing access_token")
+	}
+
+	payload := gin.H{
+		"type":         "codex",
+		"provider":     "codex",
+		"access_token": accessToken,
+		"plan_type":    "free",
+	}
+	if accountID := authContentAccountID(normalizedProvider, metadata); accountID != "" {
+		payload["account_id"] = accountID
+	}
+	return payload, "", nil
+}
+
+func (h *Handler) authMetadataByName(name string) (string, string, map[string]any, error) {
+	fileName := filepath.Base(strings.TrimSpace(name))
+	if h != nil && h.authManager != nil {
+		for _, auth := range h.authManager.List() {
+			if auth == nil {
+				continue
+			}
+			if auth.FileName != fileName && auth.ID != fileName {
+				continue
+			}
+			if len(auth.Metadata) > 0 {
+				return strings.TrimSpace(auth.Provider), fileName, auth.Metadata, nil
+			}
+			break
+		}
+	}
+
+	data, _, err := h.readAuthFileByName(fileName)
+	if err != nil {
+		return "", fileName, nil, err
+	}
+	metadata := make(map[string]any)
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return "", fileName, nil, fmt.Errorf("invalid auth json: %w", err)
+	}
+	provider := strings.TrimSpace(authContentStringValue(metadata, "type", "provider"))
+	return provider, fileName, metadata, nil
+}
+
+func (h *Handler) readAuthFileByName(name string) ([]byte, string, error) {
+	fileName := strings.TrimSpace(name)
+	if fileName == "" || strings.Contains(fileName, string(os.PathSeparator)) {
+		return nil, "", fmt.Errorf("invalid name")
+	}
+	if !strings.HasSuffix(strings.ToLower(fileName), ".json") {
+		return nil, "", fmt.Errorf("name must end with .json")
+	}
+	full := filepath.Join(h.cfg.AuthDir, fileName)
+	data, err := os.ReadFile(full)
+	if err != nil {
+		return nil, full, err
+	}
+	return data, full, nil
+}
+
+// GetAuthFileContent returns auth file content as JSON payload for API consumers.
+func (h *Handler) GetAuthFileContent(c *gin.Context) {
+	name := c.Query("name")
+	provider, fileName, metadata, err := h.authMetadataByName(name)
+	if err != nil {
+		switch {
+		case strings.Contains(err.Error(), "invalid name"), strings.Contains(err.Error(), "must end with .json"):
+			c.JSON(400, gin.H{"error": err.Error()})
+		case os.IsNotExist(err):
+			c.JSON(404, gin.H{"error": "file not found"})
+		default:
+			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
+		}
+		return
+	}
+
+	content, reason, err := authContentPayload(provider, fileName, metadata)
+	if err != nil {
+		if reason != "" {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":  err.Error(),
+				"reason": reason,
+			})
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"name":    fileName,
+		"content": content,
+	})
+}
+
 // Download single auth file by name
 func (h *Handler) DownloadAuthFile(c *gin.Context) {
 	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
-		c.JSON(400, gin.H{"error": "invalid name"})
-		return
-	}
-	if !strings.HasSuffix(strings.ToLower(name), ".json") {
-		c.JSON(400, gin.H{"error": "name must end with .json"})
-		return
-	}
-	full := filepath.Join(h.cfg.AuthDir, name)
-	data, err := os.ReadFile(full)
+	data, _, err := h.readAuthFileByName(name)
 	if err != nil {
-		if os.IsNotExist(err) {
+		switch {
+		case strings.Contains(err.Error(), "invalid name"), strings.Contains(err.Error(), "must end with .json"):
+			c.JSON(400, gin.H{"error": err.Error()})
+		case os.IsNotExist(err):
 			c.JSON(404, gin.H{"error": "file not found"})
-		} else {
+		default:
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
 		}
 		return
